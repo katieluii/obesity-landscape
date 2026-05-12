@@ -108,7 +108,6 @@ def get_pipeline() -> list:
                 "query.cond":           "obesity",
                 "query.spons":          meta["ct_sponsor"],
                 "filter.overallStatus": "RECRUITING,ACTIVE_NOT_RECRUITING,NOT_YET_RECRUITING,COMPLETED",
-                "filter.studyType":     "INTERVENTIONAL",
                 "pageSize":             50,
                 "format":               "json",
             }
