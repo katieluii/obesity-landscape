@@ -105,15 +105,14 @@ def get_pipeline() -> list:
     for ticker, meta in TICKERS.items():
         try:
             params = {
-                "query.cond":          "obesity",
-                "query.spons":         meta["ct_sponsor"],
+                "query.cond":           "obesity",
+                "query.spons":          meta["ct_sponsor"],
                 "filter.overallStatus": "RECRUITING,ACTIVE_NOT_RECRUITING,NOT_YET_RECRUITING,COMPLETED",
-                "fields":              "NCTId,BriefTitle,Phases,OverallStatus,LeadSponsorName,"
-                                       "PrimaryCompletionDate,StartDate,InterventionName,InterventionType",
-                "pageSize":            50,
-                "format":              "json",
+                "filter.studyType":     "INTERVENTIONAL",
+                "pageSize":             50,
+                "format":               "json",
             }
-            r = requests.get(CTA_BASE, params=params, timeout=15)
+            r = requests.get(CTA_BASE, params=params, timeout=30)
             r.raise_for_status()
             studies = r.json().get("studies", [])
             for s in studies:
