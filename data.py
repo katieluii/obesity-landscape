@@ -2,6 +2,7 @@
 Data fetching layer for the obesity competitive landscape API.
 All functions are synchronous (run in background threads on startup).
 """
+from __future__ import annotations
 import time
 import warnings
 import requests
@@ -236,3 +237,328 @@ def get_arima_forecast(ticker: str, price_data: dict) -> dict | None:
     except Exception as exc:
         print(f"[arima] {ticker}: {exc}")
         return None
+
+
+# ---------- firepower analysis -----------------------------------------------
+
+FIREPOWER_TICKERS: dict[str, str] = {
+    "JNJ":   "Johnson & Johnson",
+    "RHHBY": "Roche",
+    "MRK":   "Merck",
+    "NVO":   "Novo Nordisk",
+    "NVS":   "Novartis",
+    "ABBV":  "AbbVie",
+    "LLY":   "Eli Lilly",
+    "PFE":   "Pfizer",
+    "AZN":   "AstraZeneca",
+    "AMGN":  "Amgen",
+}
+
+# Companies where Normalized EBITDA is more representative than reported EBITDA
+# JNJ: $5.9B unusual items (talc reversal + investment gains) inflate FY2025 reported figure
+# ABBV: ~$7.4B/yr Allergan intangible amortization depresses reported EBITDA
+# PFE: restructuring charges and Paxlovid wind-down distort reported figure
+_USE_NORMALIZED_EBITDA = {"JNJ", "ABBV", "PFE"}
+
+# Companies in active manufacturing buildout — use OCF not FCF-after-capex
+# LLY: $50B+ US manufacturing plan; PFE: TrumpRx commitments; NVO: Catalent integration
+_CAPEX_HEAVY = {"LLY", "NVO", "PFE"}
+
+_EBITDA_NOTES: dict[str, str] = {
+    "JNJ":   "† Reported EBITDA $41.1B includes $5.9B unusual items (talc litigation reversal + investment gains). Normalized EBITDA $35.2B used.",
+    "ABBV":  "† Normalized EBITDA used; reported EBITDA $17.6B includes ~$7.4B/yr Allergan acquisition intangible amortization.",
+    "PFE":   "† Normalized EBITDA used; reported EBITDA $16.8B distorted by restructuring charges and Paxlovid wind-down.",
+    "RHHBY": "‡ FY2025 EBITDA +31% YoY in CHF (cost reduction despite flat revenue). Converted at period-end CHF/USD 1.2631. Lower than yfinance .info due to TTM methodology differences.",
+}
+
+
+def _get_fx_at_date(currency: str, date_str: str) -> tuple[float, str | None]:
+    """Get currency→USD spot rate at a specific historical date (tz-aware fix)."""
+    if currency == "USD":
+        return 1.0, None
+    pair  = f"{currency}USD=X"
+    d     = pd.Timestamp(date_str)
+    start = (d - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    end   = (d + pd.Timedelta(days=3)).strftime("%Y-%m-%d")
+    try:
+        hist = yf.Ticker(pair).history(start=start, end=end)
+        if hist.empty:
+            return 1.0, f"FX rate for {currency} unavailable"
+        hist.index = hist.index.tz_localize(None)
+        filtered = hist[hist.index <= d]
+        if filtered.empty:
+            filtered = hist
+        return float(filtered["Close"].iloc[-1]), None
+    except Exception as e:
+        return 1.0, f"FX {currency}: {e}"
+
+
+def _safe(df: pd.DataFrame, *rows) -> tuple[float | None, str | None]:
+    """Return (value, row_name) for first non-NaN row in df (most recent col)."""
+    for r in rows:
+        if r in df.index:
+            v = df.loc[r].iloc[0]
+            if pd.notna(v):
+                return float(v), r
+    return None, None
+
+
+def _b(val: float | None, fx: float) -> float | None:
+    if val is None:
+        return None
+    return round(val * fx / 1e9, 1)
+
+
+def get_firepower() -> dict:
+    """
+    M&A firepower for 10 big pharma companies from audited annual statements.
+    All monetary values in USD billions. Sorted by stretch_b descending.
+    """
+    from datetime import date as _date
+    today = _date.today().isoformat()
+    companies = []
+
+    for ticker, name in FIREPOWER_TICKERS.items():
+        try:
+            t    = yf.Ticker(ticker)
+            info = t.info
+            inc  = t.income_stmt
+            bs   = t.balance_sheet
+            cf   = t.cashflow
+
+            warnings: list[str] = []
+            fin_cur = info.get("financialCurrency", "USD")
+            period  = str(bs.columns[0].date()) if not bs.empty else None
+            mkt_cap = info.get("marketCap") or 0
+
+            fx, fx_err = _get_fx_at_date(fin_cur, period) if period else (1.0, "no period")
+            if fx_err:
+                warnings.append(fx_err)
+
+            days_old = (pd.Timestamp(today) - pd.Timestamp(period)).days if period else None
+            if days_old and days_old > 180:
+                warnings.append(f"Statement {days_old}d old — data may be stale")
+
+            # EBITDA
+            ebitda_rep,  _ = _safe(inc, "EBITDA")
+            ebitda_norm, _ = _safe(inc, "Normalized EBITDA")
+            if ticker in _USE_NORMALIZED_EBITDA and ebitda_norm:
+                ebitda = ebitda_norm
+                ebitda_src = "income_statement_normalized"
+            elif ebitda_rep:
+                ebitda = ebitda_rep
+                ebitda_src = "income_statement"
+            else:
+                oi, _ = _safe(inc, "Operating Income", "EBIT")
+                da, _ = _safe(cf,  "Depreciation And Amortization",
+                                   "Depreciation Amortization Depletion")
+                if oi and da:
+                    ebitda = oi + abs(da)
+                    ebitda_src = "computed_oi_da"
+                else:
+                    ebitda = info.get("ebitda")
+                    ebitda_src = "info_fallback"
+                    warnings.append("EBITDA from .info fallback")
+
+            # Net Debt
+            nd_val, nd_src = _safe(bs, "Net Debt")
+            cash_raw, _    = _safe(bs, "Cash Cash Equivalents And Short Term Investments",
+                                       "Cash And Cash Equivalents")
+            debt_raw, _    = _safe(bs, "Total Debt")
+            if nd_val is None:
+                if debt_raw and cash_raw:
+                    nd_val  = debt_raw - cash_raw
+                    nd_src  = "computed"
+                else:
+                    nd_val  = (info.get("totalDebt") or 0) - (info.get("totalCash") or 0)
+                    nd_src  = "info_fallback"
+                    warnings.append("Net debt from .info fallback")
+
+            # FCF
+            fcf_rep, _ = _safe(cf, "Free Cash Flow")
+            ocf,     _ = _safe(cf, "Operating Cash Flow",
+                                   "Cash Flow From Continuing Operating Activities")
+            capex,   _ = _safe(cf, "Capital Expenditure", "Purchase Of PPE")
+            fcf_norm   = ocf if ticker in _CAPEX_HEAVY else fcf_rep
+            fcf_src    = "operating_cashflow" if ticker in _CAPEX_HEAVY else "fcf_line"
+
+            # USD billions
+            ebitda_b   = _b(ebitda, fx)
+            nd_b       = _b(nd_val, fx)
+            cash_b     = _b(cash_raw, fx)
+            debt_b     = _b(debt_raw, fx)
+            fcf_rep_b  = _b(fcf_rep, fx)
+            fcf_norm_b = _b(fcf_norm, fx)
+            ocf_b      = _b(ocf, fx)
+            capex_b    = _b(capex, fx)
+            mkt_cap_b  = round(mkt_cap / 1e9, 1)
+
+            nd_ebitda  = round(nd_b / ebitda_b, 2)         if (ebitda_b and ebitda_b > 0 and nd_b is not None) else None
+            fcf_pct    = round(fcf_norm_b / ebitda_b * 100) if (fcf_norm_b and ebitda_b and ebitda_b > 0) else None
+            c_fp = round(max(0.0, 3.0 * ebitda_b - nd_b), 1) if (ebitda_b and nd_b is not None) else None
+            s_fp = round(max(0.0, 5.0 * ebitda_b - nd_b), 1) if (ebitda_b and nd_b is not None) else None
+
+            companies.append({
+                "ticker":               ticker,
+                "name":                 name,
+                "market_cap_b":         mkt_cap_b,
+                "total_cash_b":         cash_b,
+                "total_debt_b":         debt_b,
+                "ebitda_b":             ebitda_b,
+                "net_debt_b":           nd_b,
+                "nd_ebitda":            nd_ebitda,
+                "fcf_reported_b":       fcf_rep_b,
+                "fcf_normalized_b":     fcf_norm_b,
+                "ocf_b":                ocf_b,
+                "capex_b":              capex_b,
+                "fcf_ebitda_pct":       fcf_pct,
+                "comfortable_b":        c_fp,
+                "stretch_b":            s_fp,
+                "statement_period_end": period,
+                "filing_currency":      fin_cur,
+                "fx_rate":              round(fx, 4),
+                "data_quality": {
+                    "ebitda_source":   ebitda_src,
+                    "net_debt_source": nd_src,
+                    "fcf_source":      fcf_src,
+                    "warnings":        warnings,
+                    "ebitda_note":     _EBITDA_NOTES.get(ticker),
+                },
+            })
+        except Exception as exc:
+            print(f"[firepower] {ticker}: {exc}")
+
+    companies.sort(key=lambda x: (x.get("stretch_b") or 0), reverse=True)
+    return {
+        "companies": companies,
+        "last_updated": time.time(),
+        "methodology_note": (
+            "Firepower calculated from audited FY2025 financial statements. "
+            "EBITDA, net debt, and free cash flow taken from company-reported line items "
+            "rather than TTM aggregations. For companies in active manufacturing expansion "
+            "(LLY, NVO, PFE), FCF reflects operating cash flow excluding one-time strategic capex. "
+            "Comfortable firepower = capacity to lever to 3× Net Debt/EBITDA; Stretch = 5×. "
+            "All data from FY2025 annual filings (period end 2025-12-31). "
+            "M&A completed or announced in 2026 is not yet reflected in balance sheet figures."
+        ),
+    }
+
+
+# ---------- obesity biotech targets ------------------------------------------
+
+OBESITY_BIOTECH_META: dict[str, dict] = {
+    "VKTX": {
+        "name":             "Viking Therapeutics",
+        "lead_asset":       "VK2735",
+        "mechanism":        "Dual GLP-1/GIP receptor agonist",
+        "ct_query":         "VK2735",
+        "peak_sales_est_b": 8.0,
+    },
+    "GPCR": {
+        "name":             "Structure Therapeutics",
+        "lead_asset":       "GSBR-209",
+        "mechanism":        "Oral GLP-1 receptor agonist",
+        "ct_query":         "GSBR-209",
+        "peak_sales_est_b": 5.0,
+    },
+    "ALT": {
+        "name":             "Altimmune",
+        "lead_asset":       "pemvidutide",
+        "mechanism":        "GLP-1/glucagon dual agonist",
+        "ct_query":         "pemvidutide",
+        "peak_sales_est_b": 2.5,
+    },
+    "CRBP": {
+        "name":             "Corbus Pharmaceuticals",
+        "lead_asset":       "CRB-913",
+        "mechanism":        "Peripheral CB1 inverse agonist",
+        "ct_query":         "CRB-913",
+        "peak_sales_est_b": 1.5,
+    },
+}
+
+
+def _get_asset_trial_info(asset_query: str) -> dict:
+    try:
+        params = {
+            "query.intr":           asset_query,
+            "filter.overallStatus": "RECRUITING,ACTIVE_NOT_RECRUITING,NOT_YET_RECRUITING",
+            "pageSize":             10,
+            "format":               "json",
+        }
+        r = requests.get(CTA_BASE, params=params, timeout=20)
+        r.raise_for_status()
+        studies = r.json().get("studies", [])
+        if not studies:
+            return {"phase": "N/A", "next_catalyst": None}
+        phases, catalysts = [], []
+        for s in studies:
+            proto   = s.get("protocolSection", {})
+            des_mod = proto.get("designModule", {})
+            stat_mod = proto.get("statusModule", {})
+            phase   = _phase_str(des_mod.get("phases", []))
+            date    = stat_mod.get("primaryCompletionDateStruct", {}).get("date", "")
+            if phase != "N/A":
+                phases.append(phase)
+            if date:
+                catalysts.append(date)
+        best = min(phases, key=lambda p: _PHASE_ORDER.get(p, 6)) if phases else "N/A"
+        return {"phase": best, "next_catalyst": sorted(catalysts)[0] if catalysts else None}
+    except Exception as e:
+        print(f"[targets/{asset_query}]: {e}")
+        return {"phase": "N/A", "next_catalyst": None}
+
+
+def get_obesity_targets() -> list:
+    """Biotech target screening: financials + ClinicalTrials.gov phase/catalyst."""
+    result = []
+    for ticker, meta in OBESITY_BIOTECH_META.items():
+        try:
+            t    = yf.Ticker(ticker)
+            info = t.info
+            cf   = t.cashflow
+            bs   = t.balance_sheet
+
+            mkt_cap_b  = round((info.get("marketCap") or 0) / 1e9, 2)
+            cash_raw, _ = _safe(bs, "Cash Cash Equivalents And Short Term Investments",
+                                     "Cash And Cash Equivalents")
+            cash_m     = round((cash_raw or 0) / 1e6, 0)
+
+            fcf_raw, _ = _safe(cf, "Free Cash Flow")
+            if fcf_raw is None:
+                fcf_raw = info.get("freeCashflow") or 0
+            quarterly_burn_m = round(abs(fcf_raw) / 4 / 1e6, 0) if fcf_raw else 0
+            runway_months    = round(cash_m / quarterly_burn_m) if quarterly_burn_m > 0 else None
+
+            trial = _get_asset_trial_info(meta["ct_query"])
+            time.sleep(0.3)
+
+            sig_runway  = runway_months is not None and runway_months < 24
+            sig_stage   = trial["phase"] in ("Phase 2", "Phase 2/Phase 3", "Phase 3")
+            sig_cheap   = mkt_cap_b < 2 * meta["peak_sales_est_b"]
+            acq_score   = sum([sig_runway, sig_stage, sig_cheap])
+
+            result.append({
+                "ticker":           ticker,
+                "name":             meta["name"],
+                "market_cap_b":     mkt_cap_b,
+                "cash_m":           cash_m,
+                "quarterly_burn_m": quarterly_burn_m,
+                "runway_months":    runway_months,
+                "lead_asset":       meta["lead_asset"],
+                "mechanism":        meta["mechanism"],
+                "peak_sales_est_b": meta["peak_sales_est_b"],
+                "phase":            trial["phase"],
+                "next_catalyst":    trial["next_catalyst"],
+                "acq_score":        acq_score,
+                "acq_badge":        "High" if acq_score == 3 else ("Med" if acq_score == 2 else "Low"),
+                "acq_signals": {
+                    "short_runway":  sig_runway,
+                    "late_stage":    sig_stage,
+                    "cheap_vs_peak": sig_cheap,
+                },
+            })
+        except Exception as exc:
+            print(f"[targets] {ticker}: {exc}")
+
+    return sorted(result, key=lambda x: x["acq_score"], reverse=True)

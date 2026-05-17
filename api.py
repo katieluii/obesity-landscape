@@ -43,6 +43,12 @@ def _refresh() -> None:
                 forecasts[ticker] = fc
         _cache["forecasts"] = forecasts
 
+        print("[refresh] fetching firepower data...")
+        _cache["firepower"] = d.get_firepower()
+
+        print("[refresh] fetching obesity biotech targets...")
+        _cache["obesity_targets"] = d.get_obesity_targets()
+
         _cache["last_updated"] = time.time()
         _ready = True
         print("[refresh] complete.")
@@ -95,3 +101,13 @@ def drypowder():
 def forecast(ticker: str):
     forecasts = _cache.get("forecasts", {})
     return forecasts.get(ticker.upper(), {"error": "not ready yet", "ticker": ticker.upper()})
+
+
+@app.get("/firepower")
+def firepower():
+    return _cache.get("firepower", {"companies": [], "last_updated": None})
+
+
+@app.get("/obesity-targets")
+def obesity_targets():
+    return _cache.get("obesity_targets", [])
