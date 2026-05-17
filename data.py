@@ -23,7 +23,6 @@ TICKERS: dict[str, dict] = {
     "VKTX":  {"name": "Viking Therapeutics",    "ct_sponsor": "Viking Therapeutics"},
     "GPCR":  {"name": "Structure Therapeutics", "ct_sponsor": "Structure Therapeutics"},
     "ALT":   {"name": "Altimmune",              "ct_sponsor": "Altimmune"},
-    "ZEAL":  {"name": "Zealand Pharma",         "ct_sponsor": "Zealand Pharma"},
 }
 
 CTA_BASE = "https://clinicaltrials.gov/api/v2/studies"
@@ -60,20 +59,58 @@ def get_stock_prices() -> dict:
 
 # ---------- M&A dry-powder (balance sheet) --------------------------------
 
+_FX_CACHE: dict[str, float] = {}
+
+def _to_usd(value: float, currency: str) -> float:
+    """Convert a financial value from `currency` to USD using a live spot rate."""
+    if currency == "USD" or not value:
+        return value
+    if currency not in _FX_CACHE:
+        try:
+            hist = yf.Ticker(f"{currency}USD=X").history(period="5d")
+            _FX_CACHE[currency] = float(hist["Close"].dropna().iloc[-1])
+        except Exception as exc:
+            print(f"[fx] {currency}: {exc}")
+            _FX_CACHE[currency] = 1.0
+    return value * _FX_CACHE[currency]
+
+
 def get_dry_powder() -> list:
-    """Cash, debt, market cap, FCF from yfinance.info — ranked by net cash."""
+    """Cash, debt, market cap, FCF from yfinance — all values normalised to USD."""
     result = []
     for ticker, meta in TICKERS.items():
         try:
-            info = yf.Ticker(ticker).info
+            t    = yf.Ticker(ticker)
+            info = t.info
+
+            fin_currency = info.get("financialCurrency") or "USD"
+
+            # Filing date from annual balance sheet (most recent column)
+            try:
+                bs = t.balance_sheet
+                filing_date = bs.columns[0].strftime("%b %Y") if not bs.empty else "—"
+            except Exception:
+                filing_date = "—"
+
+            # Raw financial figures (may be in fin_currency, not USD)
             total_cash = info.get("totalCash") or 0
             total_debt = info.get("totalDebt") or 0
-            market_cap = info.get("marketCap") or 0
             fcf        = info.get("freeCashflow") or 0
-            net_cash   = total_cash - total_debt
+            # marketCap is shares × USD price — already in USD for US-listed tickers
+            market_cap = info.get("marketCap") or 0
+
+            # Convert to USD if needed
+            if fin_currency != "USD":
+                total_cash = _to_usd(total_cash, fin_currency)
+                total_debt = _to_usd(total_debt, fin_currency)
+                fcf        = _to_usd(fcf, fin_currency)
+
+            net_cash = total_cash - total_debt
             result.append({
                 "ticker":            ticker,
                 "name":              meta["name"],
+                "filing_date":       filing_date,
+                "filing_currency":   fin_currency,
                 "market_cap":        market_cap,
                 "total_cash":        total_cash,
                 "total_debt":        total_debt,
