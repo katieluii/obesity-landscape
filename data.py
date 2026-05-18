@@ -448,32 +448,58 @@ def get_firepower() -> dict:
 
 OBESITY_BIOTECH_META: dict[str, dict] = {
     "VKTX": {
-        "name":             "Viking Therapeutics",
-        "lead_asset":       "VK2735",
-        "mechanism":        "Dual GLP-1/GIP receptor agonist",
-        "ct_query":         "VK2735",
-        "peak_sales_est_b": 8.0,
+        "name":                   "Viking Therapeutics",
+        "lead_asset":             "VK2735",
+        "mechanism":              "Dual GLP-1/GIP receptor agonist",
+        "ct_query":               "VK2735",
+        "peak_sales_est_b":       8.0,
+        "is_obesity_indication":  True,
+        "is_differentiated":      True,
+        "has_poc_data":           True,
+        # No mgmt runway guidance found — compute from yfinance with 1.5× forward multiplier
+        "runway_months_mgmt":     None,
+        "forward_burn_multiplier": 1.5,
     },
     "GPCR": {
-        "name":             "Structure Therapeutics",
-        "lead_asset":       "GSBR-209",
-        "mechanism":        "Oral GLP-1 receptor agonist",
-        "ct_query":         "GSBR-209",
-        "peak_sales_est_b": 5.0,
+        "name":                   "Structure Therapeutics",
+        "lead_asset":             "aleniglipron",          # was GSBR-209 (incorrect)
+        "mechanism":              "Oral small-molecule GLP-1 receptor agonist (biased agonist)",
+        "ct_query":               "aleniglipron",
+        "peak_sales_est_b":       5.0,
+        "is_obesity_indication":  True,
+        "is_differentiated":      True,
+        "has_poc_data":           True,  # ACCESS Ph2: 16.3% placebo-adj. weight loss
+        # Q1 2026 earnings: "funded through end of 2028" — ~31 months from 2026-03-31
+        "runway_months_mgmt":     31,
+        "report_date":            "2026-03-31",
     },
     "ALT": {
-        "name":             "Altimmune",
-        "lead_asset":       "pemvidutide",
-        "mechanism":        "GLP-1/glucagon dual agonist",
-        "ct_query":         "pemvidutide",
-        "peak_sales_est_b": 2.5,
+        "name":                   "Altimmune",
+        "lead_asset":             "pemvidutide",
+        "mechanism":              "GLP-1/glucagon dual agonist",
+        "ct_query":               "pemvidutide",
+        "peak_sales_est_b":       2.5,
+        "is_obesity_indication":  True,
+        "is_differentiated":      True,
+        "has_poc_data":           True,
+        # Q1 2026: CEO — "through Phase 3 MASH 52-wk readout expected 2029" (pro forma $535M cash)
+        "runway_months_mgmt":     36,
+        "report_date":            "2026-03-31",
+        "cash_override_m":        535.0,  # pro forma post-April 2026 $225M offering
     },
     "CRBP": {
-        "name":             "Corbus Pharmaceuticals",
-        "lead_asset":       "CRB-913",
-        "mechanism":        "Peripheral CB1 inverse agonist",
-        "ct_query":         "CRB-913",
-        "peak_sales_est_b": 1.5,
+        "name":                   "Corbus Pharmaceuticals",
+        "lead_asset":             "CRB-913",
+        "mechanism":              "Peripheral CB1 inverse agonist",
+        "ct_query":               "CRB-913",
+        "peak_sales_est_b":       1.5,
+        "is_obesity_indication":  True,
+        "is_differentiated":      True,
+        "has_poc_data":           False,  # Phase 1b — no obesity PoC data yet
+        # Q1 2026: "expected to fund operations into 2028" — ~22 months from 2026-03-31
+        "runway_months_mgmt":     22,
+        "report_date":            "2026-03-31",
+        "cash_override_m":        138.2,
     },
 }
 
@@ -510,7 +536,12 @@ def _get_asset_trial_info(asset_query: str) -> dict:
 
 
 def get_obesity_targets() -> list:
-    """Biotech target screening: financials + ClinicalTrials.gov phase/catalyst."""
+    """
+    Biotech target screening: financials + ClinicalTrials.gov phase/catalyst.
+    Returns two scoring dimensions per target:
+      - deal_pressure: forced-seller dynamics (runway, stage, valuation)
+      - strategic_fit:  asset attractiveness to big pharma (indication, mechanism, de-risking)
+    """
     result = []
     for ticker, meta in OBESITY_BIOTECH_META.items():
         try:
@@ -519,39 +550,89 @@ def get_obesity_targets() -> list:
             cf   = t.cashflow
             bs   = t.balance_sheet
 
-            mkt_cap_b  = round((info.get("marketCap") or 0) / 1e9, 2)
-            cash_raw, _ = _safe(bs, "Cash Cash Equivalents And Short Term Investments",
-                                     "Cash And Cash Equivalents")
-            cash_m     = round((cash_raw or 0) / 1e6, 0)
+            mkt_cap_b = round((info.get("marketCap") or 0) / 1e9, 2)
 
-            fcf_raw, _ = _safe(cf, "Free Cash Flow")
-            if fcf_raw is None:
-                fcf_raw = info.get("freeCashflow") or 0
-            quarterly_burn_m = round(abs(fcf_raw) / 4 / 1e6, 0) if fcf_raw else 0
-            runway_months    = round(cash_m / quarterly_burn_m) if quarterly_burn_m > 0 else None
+            # Cash: use management override (post-offering) if available, else balance sheet
+            cash_override = meta.get("cash_override_m")
+            if cash_override:
+                cash_m = float(cash_override)
+            else:
+                cash_raw, _ = _safe(bs, "Cash Cash Equivalents And Short Term Investments",
+                                        "Cash And Cash Equivalents")
+                cash_m = round((cash_raw or 0) / 1e6, 0)
+
+            # Runway: use management guidance if available, else compute from FCF
+            mgmt_runway = meta.get("runway_months_mgmt")
+            if mgmt_runway is not None:
+                runway_months    = int(mgmt_runway)
+                multiplier       = meta.get("forward_burn_multiplier", 1.0)
+                # Implied monthly burn from cash / runway
+                monthly_burn_m   = round(cash_m / runway_months, 1) if runway_months else 0
+                quarterly_burn_m = round(monthly_burn_m * 3, 0)
+            else:
+                fcf_raw, _ = _safe(cf, "Free Cash Flow")
+                if fcf_raw is None:
+                    fcf_raw = info.get("freeCashflow") or 0
+                multiplier       = meta.get("forward_burn_multiplier", 1.5)
+                ttm_annual_burn  = abs(fcf_raw) * multiplier if fcf_raw else 0
+                quarterly_burn_m = round(ttm_annual_burn / 4 / 1e6, 0)
+                monthly_burn_m   = round(quarterly_burn_m / 3, 1)
+                runway_months    = round(cash_m / monthly_burn_m) if monthly_burn_m > 0 else None
 
             trial = _get_asset_trial_info(meta["ct_query"])
             time.sleep(0.3)
 
-            sig_runway  = runway_months is not None and runway_months < 24
-            sig_stage   = trial["phase"] in ("Phase 2", "Phase 2/Phase 3", "Phase 3")
-            sig_cheap   = mkt_cap_b < 2 * meta["peak_sales_est_b"]
-            acq_score   = sum([sig_runway, sig_stage, sig_cheap])
+            # ── Deal pressure scoring ────────────────────────────────────────
+            sig_runway   = runway_months is not None and runway_months < 24
+            sig_stage    = trial["phase"] in ("Phase 2", "Phase 2/Phase 3", "Phase 3")
+            sig_cheap    = mkt_cap_b < 2 * meta["peak_sales_est_b"]
+            dp_score     = sum([sig_runway, sig_stage, sig_cheap])
+            dp_badge     = "High" if dp_score == 3 else ("Med" if dp_score == 2 else "Low")
+
+            # ── Strategic fit scoring ────────────────────────────────────────
+            sig_obesity   = meta.get("is_obesity_indication", False)
+            sig_diff      = meta.get("is_differentiated", False)
+            sig_derisk    = (
+                trial["phase"] in ("Phase 3", "Phase 2/Phase 3") or
+                meta.get("has_poc_data", False)
+            )
+            sf_score      = sum([sig_obesity, sig_diff, sig_derisk])
+            sf_badge      = "High" if sf_score == 3 else ("Med" if sf_score == 2 else "Low")
 
             result.append({
-                "ticker":           ticker,
-                "name":             meta["name"],
-                "market_cap_b":     mkt_cap_b,
-                "cash_m":           cash_m,
-                "quarterly_burn_m": quarterly_burn_m,
-                "runway_months":    runway_months,
-                "lead_asset":       meta["lead_asset"],
-                "mechanism":        meta["mechanism"],
-                "peak_sales_est_b": meta["peak_sales_est_b"],
-                "phase":            trial["phase"],
-                "next_catalyst":    trial["next_catalyst"],
-                "acq_score":        acq_score,
-                "acq_badge":        "High" if acq_score == 3 else ("Med" if acq_score == 2 else "Low"),
+                "ticker":            ticker,
+                "name":              meta["name"],
+                "market_cap_b":      mkt_cap_b,
+                "cash_m":            cash_m,
+                "quarterly_burn_m":  quarterly_burn_m,
+                "monthly_burn_m":    monthly_burn_m,
+                "runway_months":     runway_months,
+                "runway_source":     "management_guidance" if mgmt_runway else "computed",
+                "runway_report_date": meta.get("report_date"),
+                "lead_asset":        meta["lead_asset"],
+                "mechanism":         meta["mechanism"],
+                "peak_sales_est_b":  meta["peak_sales_est_b"],
+                "phase":             trial["phase"],
+                "next_catalyst":     trial["next_catalyst"],
+                # Deal pressure
+                "deal_pressure_score":   dp_score,
+                "deal_pressure_badge":   dp_badge,
+                "deal_pressure_signals": {
+                    "short_runway":  sig_runway,
+                    "late_stage":    sig_stage,
+                    "cheap_vs_peak": sig_cheap,
+                },
+                # Strategic fit
+                "strategic_fit_score":   sf_score,
+                "strategic_fit_badge":   sf_badge,
+                "strategic_fit_signals": {
+                    "obesity_indication": sig_obesity,
+                    "differentiated":     sig_diff,
+                    "derisked":           sig_derisk,
+                },
+                # Legacy fields kept for backward compatibility
+                "acq_score":  dp_score,
+                "acq_badge":  dp_badge,
                 "acq_signals": {
                     "short_runway":  sig_runway,
                     "late_stage":    sig_stage,
@@ -561,4 +642,4 @@ def get_obesity_targets() -> list:
         except Exception as exc:
             print(f"[targets] {ticker}: {exc}")
 
-    return sorted(result, key=lambda x: x["acq_score"], reverse=True)
+    return sorted(result, key=lambda x: x["strategic_fit_score"] * 10 + x["deal_pressure_score"], reverse=True)
