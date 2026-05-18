@@ -16,14 +16,22 @@ warnings.filterwarnings("ignore")
 # ---------- ticker universe -----------------------------------------------
 
 TICKERS: dict[str, dict] = {
-    "NVO":   {"name": "Novo Nordisk",           "ct_sponsor": "Novo Nordisk"},
-    "LLY":   {"name": "Eli Lilly",              "ct_sponsor": "Eli Lilly"},
-    "AMGN":  {"name": "Amgen",                  "ct_sponsor": "Amgen"},
-    "AZN":   {"name": "AstraZeneca",            "ct_sponsor": "AstraZeneca"},
-    "RHHBY": {"name": "Roche",                  "ct_sponsor": "Hoffmann-La Roche"},
-    "VKTX":  {"name": "Viking Therapeutics",    "ct_sponsor": "Viking Therapeutics"},
-    "GPCR":  {"name": "Structure Therapeutics", "ct_sponsor": "Structure Therapeutics"},
-    "ALT":   {"name": "Altimmune",              "ct_sponsor": "Altimmune"},
+    # ── Tier 1 — Acquirers (sorted by stretch firepower descending) ────────────
+    "JNJ":   {"name": "Johnson & Johnson",     "ct_sponsor": "Janssen Research & Development, LLC"},
+    "LLY":   {"name": "Eli Lilly",             "ct_sponsor": "Eli Lilly"},
+    "NVO":   {"name": "Novo Nordisk",          "ct_sponsor": "Novo Nordisk"},
+    "MRK":   {"name": "Merck",                "ct_sponsor": "Merck Sharp & Dohme LLC"},
+    "RHHBY": {"name": "Roche",                "ct_sponsor": "Hoffmann-La Roche"},
+    "NVS":   {"name": "Novartis",             "ct_sponsor": "Novartis Pharmaceuticals"},
+    "AZN":   {"name": "AstraZeneca",          "ct_sponsor": "AstraZeneca"},
+    "PFE":   {"name": "Pfizer",               "ct_sponsor": "Pfizer"},
+    "ABBV":  {"name": "AbbVie",               "ct_sponsor": "AbbVie"},
+    "AMGN":  {"name": "Amgen",                "ct_sponsor": "Amgen"},
+    # ── Tier 2 — Targets ──────────────────────────────────────────────────────
+    "VKTX":  {"name": "Viking Therapeutics",  "ct_sponsor": "Viking Therapeutics"},
+    "GPCR":  {"name": "Structure Therapeutics","ct_sponsor": "Structure Therapeutics"},
+    "ALT":   {"name": "Altimmune",            "ct_sponsor": "Altimmune"},
+    "CRBP":  {"name": "Corbus Pharmaceuticals","ct_sponsor": "Corbus Pharmaceuticals"},
 }
 
 CTA_BASE = "https://clinicaltrials.gov/api/v2/studies"
